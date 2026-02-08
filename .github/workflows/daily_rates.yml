@@ -38,7 +38,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
           # data 폴더의 파일을 스테이징
-          git add data/exchange_rates.csv
+          git add data/exchange_rates.csv logs/execution.log
           
           # 변경사항이 있을 때만 커밋
           git commit -m "Update exchange rates [$(date)]" || exit 0
