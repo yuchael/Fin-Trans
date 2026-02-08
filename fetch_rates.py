@@ -145,7 +145,7 @@ def save_to_mysql(df, date_str):
         logging.info(f"🔌 MySQL 저장 시작 (기준일: {formatted_date})")
         
         # 1. 기존 데이터 삭제 (중복 방지)
-        delete_sql = "DELETE FROM exchange_rates WHERE reference_date = %s"
+        delete_sql = "DELETE FROM exchange_rates"
         execute_query(delete_sql, (formatted_date,))
         
         # 2. 새 데이터 삽입
