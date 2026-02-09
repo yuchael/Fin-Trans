@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 annotated-types==0.7.0
 anyio==4.12.1
 certifi==2026.1.4
@@ -47,3 +48,22 @@ urllib3==2.6.3
 uuid_utils==0.14.0
 xxhash==3.6.0
 zstandard==0.25.0
+=======
+python-dotenv
+requests
+tiktoken
+langchain
+langchain-community
+langchain-core
+langchain-openai
+chromadb
+pdfplumber
+pymysql
+sqlalchemy
+pandas
+openpyxl
+openai
+numpy
+tqdm
+langchain-experimental 
+>>>>>>> fin-rag
