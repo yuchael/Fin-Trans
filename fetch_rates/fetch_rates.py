@@ -4,16 +4,22 @@ import sys
 import pandas as pd
 import logging
 import re
-import io  # [필수] 문자열을 파일처럼 다루기 위해 필요
+import io
 from datetime import datetime
 from dotenv import load_dotenv
 
-# utils 폴더의 handle_sql.py에서 함수 불러오기
+current_file_path = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(current_file_path))
+
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 try:
     from utils.handle_sql import execute_query, execute_many
-except ImportError:
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from utils.handle_sql import execute_query, execute_many
+except ImportError as e:
+    logging.error(f"❌ utils 폴더를 찾을 수 없습니다. 경로 확인 필요: {e}")
+    sys.exit(1)
+
 
 load_dotenv()
 
@@ -33,7 +39,7 @@ def setup_logging():
     )
 
 def fetch_naver_rates():
-    """네이버 금융 환율 정보를 가져옵니다. (파일 저장 없이 메모리 처리)"""
+    """네이버 금융 환율 정보를 가져옵니다. (HTML 파일 저장 포함)"""
     url = "https://finance.naver.com/marketindex/exchangeList.naver"
     
     headers = {
@@ -49,9 +55,26 @@ def fetch_naver_rates():
             # 1. 인코딩 설정 (네이버 금융은 cp949/euc-kr 사용)
             response.encoding = 'cp949'
             
-            # 2. 데이터 파싱 (파일 저장 로직 제거됨)
+            # 2. [추가됨] 날짜 및 경로 설정
+            now = datetime.now()
+            date_str = now.strftime("%Y%m%d")
+            
+            save_dir = "data"
+            os.makedirs(save_dir, exist_ok=True) # 폴더가 없으면 생성
+            
+            # 3. [추가됨] HTML 파일 저장 로직
+            html_filename = os.path.join(save_dir, f"naver_exchange.html")
             try:
-                # [중요] response.text를 바로 read_html에 넣으면 파일 경로로 착각할 수 있어 io.StringIO 사용
+                # 원본은 cp949지만, 저장할 때는 범용적인 utf-8로 변환하여 저장합니다.
+                with open(html_filename, "w", encoding="utf-8") as f:
+                    f.write(response.text)
+                logging.info(f"💾 원본 HTML 저장 완료: {html_filename}")
+            except Exception as e:
+                logging.error(f"⚠️ HTML 파일 저장 실패: {e}")
+
+            # 4. 데이터 파싱
+            try:
+                # response.text를 바로 read_html에 넣으면 파일 경로로 착각할 수 있어 io.StringIO 사용
                 html_io = io.StringIO(response.text)
                 
                 # header=1: 두 번째 줄(사실 때, 파실 때 등)을 헤더로 인식 시도
@@ -59,20 +82,9 @@ def fetch_naver_rates():
                 
                 if dfs:
                     df = dfs[0]
-                    # 네이버 금융 환율표 구조 기반 인덱싱 (화면에 보이는 순서대로)
-                    # col 0: 통화명
-                    # col 1: 매매기준율
-                    # col 4: 송금 보내실 때 (TTS)
-                    # col 5: 송금 받으실 때 (TTB)
-                    
-                    # 필요한 컬럼만 위치(index)로 추출하여 복사
+                    # 네이버 금융 환율표 구조 기반 인덱싱
                     target_df = df.iloc[:, [0, 1, 4, 5]].copy()
-                    
-                    # 컬럼명 재설정 (DB 컬럼과 매핑하기 좋게 직관적으로 변경)
                     target_df.columns = ['통화명', '매매기준율', '전신환_보내실때', '전신환_받으실때']
-                    
-                    now = datetime.now()
-                    date_str = now.strftime("%Y%m%d")
                     
                     logging.info(f"✅ 파싱 성공! 데이터 {len(target_df)}건을 찾았습니다.")
                     return target_df, date_str
@@ -129,7 +141,7 @@ def process_and_save(df, date_str):
 
     # --- CSV 저장 ---
     save_dir = "data"
-    os.makedirs(save_dir, exist_ok=True)
+    # os.makedirs(save_dir, exist_ok=True) # fetch 단계에서 이미 생성했으므로 생략 가능하나 안전장치로 유지해도 됨
     csv_filename = os.path.join(save_dir, "exchange_rates.csv")
     df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     logging.info(f"💾 CSV 저장 완료: {csv_filename}")
@@ -145,8 +157,8 @@ def save_to_mysql(df, date_str):
         logging.info(f"🔌 MySQL 저장 시작 (기준일: {formatted_date})")
         
         # 1. 기존 데이터 삭제 (중복 방지)
-        delete_sql = "DELETE FROM exchange_rates WHERE reference_date = %s"
-        execute_query(delete_sql, (formatted_date,))
+        delete_sql = "DELETE FROM exchange_rates WHERE reference_date = %s or reference_date != %s"
+        execute_query(delete_sql, (formatted_date,formatted_date))
         
         # 2. 새 데이터 삽입
         insert_sql = """

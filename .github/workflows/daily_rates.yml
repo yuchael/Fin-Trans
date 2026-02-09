@@ -37,14 +37,14 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           DB_PORT: ${{ secrets.DB_PORT }}
         run: |
-          python fetch_rates.py
+          python fetch_rates/fetch_rates.py
 
       - name: 변경 사항 커밋 및 푸시
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          git add data/exchange_rates.csv logs/execution.log
+          git add data/exchange_rates.csv data/naver_exchange.html logs/execution.log
           git commit -m "Update exchange rates [$(date)]" || exit 0
           
           # UI에서 막혀있을 때를 대비해 명시적 푸시
