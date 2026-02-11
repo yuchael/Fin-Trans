@@ -67,11 +67,22 @@ def ask_llm(text):
     변환된 텍스트를 LLM(GPT)에게 보내고 답변을 받는 함수
     """
     try:
+        with open("prompt/mic_system_prompt.md", "r", encoding="utf-8") as f:
+                system_prompt_content = f.read()
+            
+
+        # 2. API 호출에 적용
         response = client.chat.completions.create(
-            model="gpt-4o", 
+            model="gpt-4o-mini", 
             messages=[
-                {"role": "system", "content": "당신은 도움이 되는 AI 비서입니다. 한국어로 간결하게 답해주세요."},
-                {"role": "user", "content": text}
+                {
+                    "role": "system", 
+                    "content": system_prompt_content
+                },
+                {
+                    "role": "user", 
+                    "content": text
+                }
             ]
         )
         return response.choices[0].message.content
