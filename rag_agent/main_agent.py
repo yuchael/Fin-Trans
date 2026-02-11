@@ -6,8 +6,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # 우리가 만든 두 전문가(모듈)를 불러옵니다.
-from sql_agent import get_sql_answer
-from finrag_agent import get_rag_answer
+from rag_agent.sql_agent import get_sql_answer
+from rag_agent.finrag_agent import get_rag_answer
 
 # 환경 변수 로드
 load_dotenv()
