@@ -2,6 +2,7 @@ import os
 import speech_recognition as sr
 from openai import OpenAI
 from dotenv import load_dotenv  # 추가된 부분
+import io
 
 # 1. .env 파일 로드
 # 이 함수가 실행되면 .env 파일의 내용이 환경 변수로 등록됩니다.
@@ -54,12 +55,34 @@ def transcribe_audio(filename):
         with open(filename, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
-                file=audio_file,
+                file=audio_file
                 # language="ko" # 필요 시 언어 강제 설정 가능
             )
         return transcript.text
     except Exception as e:
         print(f"오류 발생 (STT): {e}")
+        return None
+
+def transcribe_audio_bytes(audio_bytes):
+    """
+    브라우저에서 넘어온 오디오 바이트 데이터를 Whisper로 변환
+    """
+    if not audio_bytes: 
+        return None
+    
+    try:
+        # OpenAI API는 파일 객체 형태(name 속성 필요)를 원하므로 BytesIO 래핑
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "voice.wav"  # 가상의 파일명 지정 (필수)
+
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1", 
+            file=audio_file,
+            #language="ko" # 한국어 보정
+        )
+        return transcript.text
+    except Exception as e:
+        print(f"STT Error: {e}")
         return None
 
 def ask_llm(text):
@@ -89,6 +112,9 @@ def ask_llm(text):
     except Exception as e:
         print(f"오류 발생 (LLM): {e}")
         return None
+
+
+
 # --- 메인 실행 흐름 ---
 if __name__ == "__main__":
     retry_mic = False  # 음성 인식 자동 재시도를 제어할 상태 변수 추가
