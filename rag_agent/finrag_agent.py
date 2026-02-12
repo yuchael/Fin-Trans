@@ -2,118 +2,118 @@ import os
 import json
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
+from utils.handle_sql import get_data  # DB 연결 모듈
 
 # 1. 환경 설정
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_NAME = os.getenv("DB_NAME", "fintech_agent")
-
-# 전역 변수 선언 (데이터를 한 번만 로딩하기 위함)
+# 전역 변수
 df = None
 embedding_matrix = None
 
+# 프롬프트 파일 경로 설정
+CURRENT_FILE_PATH = Path(__file__).resolve() 
+PROJECT_ROOT = CURRENT_FILE_PATH.parent.parent 
+PROMPT_PATH = PROJECT_ROOT / "utils" / "system_prompt.md" 
+
 def load_knowledge_base():
-    """DB에서 금융 지식을 로드하고 벡터 행렬을 생성합니다."""
+    """DB 데이터 로딩"""
     global df, embedding_matrix
-    if df is not None:
-        return # 이미 로딩되었다면 스킵
+    if df is not None: return
 
-    print("⏳ [RAG] 금융 지식 베이스를 로딩 중입니다...")
-    db_url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
-    engine = create_engine(db_url)
+    print("⏳ [RAG] 금융 지식 베이스 로딩 중...")
+    try:
+        rows = get_data("SELECT word, definition, embedding FROM terms")
+        df = pd.DataFrame(rows)
+        
+        if df.empty:
+            print("⚠️ 데이터 없음.")
+            return
 
-    df = pd.read_sql("SELECT word, definition, embedding FROM terms", engine)
-    df['embedding'] = df['embedding'].apply(json.loads)
-    embedding_matrix = np.vstack(df['embedding'].values)
-    print(f"✅ 로딩 완료! (총 {len(df)}개 용어)")
+        df['embedding'] = df['embedding'].apply(json.loads)
+        embedding_matrix = np.vstack(df['embedding'].values)
+        print(f"✅ 로딩 완료 ({len(df)}개)")
+    except Exception as e:
+        print(f"❌ 로딩 오류: {e}")
+        df = None
 
-# 유틸리티 함수
 def get_embedding(text):
     return client.embeddings.create(input=[text], model="text-embedding-3-small").data[0].embedding
 
 def search_docs(query_text, top_k=3):
+    if df is None: return pd.DataFrame()
+    
     query_vec = get_embedding(query_text)
     similarities = np.dot(embedding_matrix, query_vec) / (
         np.linalg.norm(embedding_matrix, axis=1) * np.linalg.norm(query_vec)
     )
     df['similarity'] = similarities
-    return df.sort_values('similarity', ascending=False).head(top_k)
+    # 유사도 0.3 이상인 것만 필터링 (너무 엉뚱한 문서 제외)
+    return df[df['similarity'] >= 0.3].sort_values('similarity', ascending=False).head(top_k)
 
-def translate_query_to_korean(user_query):
-    """외국어 질문을 한국어 검색 키워드로 변환합니다."""
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": """
-             You are a sophisticated translation assistant for a Korean Financial Terminology Search Engine.
-             Your goal is to convert the user's query into the most appropriate Korean financial keyword.
-             Output ONLY the Korean keyword(s).
-             """},
-            {"role": "user", "content": user_query}
-        ],
-        temperature=0
-    )
-    return response.choices[0].message.content.strip()
+def read_prompt_file():
+    """MD 파일에서 시스템 프롬프트 읽기"""
+    try:
+        with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return "You are a helpful assistant." # 파일 없을 시 기본값
 
-# 🔥 외부(main_agent.py)에서 호출할 공식 함수
-def get_rag_answer(user_query):
-    # 호출 시점에 데이터가 로드 안 되어 있다면 로드
-    if df is None:
-        load_knowledge_base()
+# 🔥 핵심 함수: 인자에 original_query 추가
+def get_rag_answer(korean_query, original_query=None):
+    if df is None: load_knowledge_base()
 
-    # [수정 1] 번역 단계 삭제 (이미 main_agent에서 한국어로 줌)
-    # korean_search_term = translate_query_to_korean(user_query) <- 삭제
-    korean_search_term = user_query # 받은 그대로 검색어로 사용
-
-    # 2. 검색 단계
-    relevant_docs = search_docs(korean_search_term)
+    # 1. 문서 검색
+    relevant_docs = search_docs(korean_query, top_k=3)
     
-    # 유사도 체크 (관련성 낮은 경우 방어)
-    if relevant_docs.iloc[0]['similarity'] < 0.30:
-        return "죄송합니다. 해당 질문과 관련된 금융 지식을 찾지 못했습니다."
-
-    # 3. 컨텍스트 구성
+    # 2. 컨텍스트 및 출처(Citation) 구성
     context_text = ""
-    for idx, row in relevant_docs.iterrows():
-        context_text += f"Term: {row['word']}\nDefinition: {row['definition']}\n\n"
-
-    # [수정 2] 시스템 프롬프트 변경 (한국어 답변 강제)
-    system_prompt = f"""
-    You are a helpful Financial Expert AI. 
-    Explain the financial concept based on the [Context].
+    citations = []
     
-    [Rules]
-    1. Answer ONLY in Korean. (무조건 한국어로 답변하세요)
-    2. Explain clearly and easily.
-    
-    [Context]
-    {context_text}
-    """
+    if not relevant_docs.empty:
+        for idx, row in relevant_docs.iterrows():
+            context_text += f"Term: {row['word']}\nDefinition: {row['definition']}\n\n"
+            citations.append(f"- **{row['word']}**: {row['definition'][:50]}... (유사도: {row['similarity']:.2f})")
+    else:
+        context_text = "관련된 DB 정보가 없습니다. 일반적인 지식을 활용하세요."
+        citations.append("- 검색된 관련 문서가 없습니다.")
 
+    # 3. 프롬프트 로딩 및 구성
+    system_template = read_prompt_file()
+    formatted_system_prompt = system_template.format(context=context_text)
+
+    # 4. LLM 호출
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query}
+            {"role": "system", "content": formatted_system_prompt},
+            {"role": "user", "content": f"질문에 대해 초등학생 선생님처럼 핵심만 짧게 답변해 주세요: {korean_query}"}
         ],
-        temperature=0
+        temperature=0.3
     )
+    
+    ai_answer = response.choices[0].message.content.strip()
 
-    return response.choices[0].message.content.strip()
+    # 5. 최종 출력 포맷팅 (요청하신 부분)
+    final_output = f"""
+### 🌏 질문 (Question)
+- **Original**: {original_query if original_query else korean_query}
+- **Translated**: {korean_query}
 
-# 단독 테스트용
+### 💡 선생님의 답변
+{ai_answer}
+
+---
+### 📚 참고 문헌 (References)
+{chr(10).join(citations)}
+    """
+    
+    return final_output
+
 if __name__ == "__main__":
-    # 단독 실행 시에만 로딩 및 루프 가동
     load_knowledge_base()
-    while True:
-        inp = input("\nQ (exit to quit): ")
-        if inp.lower() in ['exit', 'quit']: break
-        print(f"\nA: {get_rag_answer(inp)}")
+    print(get_rag_answer("집을 구하려면 어떻게 해야해?", "How can I find a house?"))
