@@ -1,106 +1,142 @@
 import os
-from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_community.utilities import SQLDatabase
-from langchain_community.tools import QuerySQLDatabaseTool
-from operator import itemgetter
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from dotenv import load_dotenv
+
+from utils.handle_sql import get_data
 
 # 1. 환경 변수 로드
 load_dotenv()
 
-# 2. DB 연결
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_NAME = "fintech_agent"
-
-db_uri = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-db = SQLDatabase.from_uri(db_uri)
-
-# 3. LLM 설정
+# 2. LLM 설정
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-# 4. SQL 청소 함수
+# --- [추가] 동적 스키마 조회 함수 ---
+# LangChain의 SQLDatabase 대신, 직접 현재 DB의 테이블 정보를 문자열로 만들어줍니다.
+def get_schema_info():
+    try:
+        # 테이블 목록 조회
+        tables = get_data("SHOW TABLES")
+        schema_text = ""
+        
+        for table in tables:
+            # 딕셔너리 값 중 첫 번째가 테이블 이름 (Key는 'Tables_in_dbName' 등으로 가변적)
+            table_name = list(table.values())[0]
+            schema_text += f"\n[Table: {table_name}]\n"
+            
+            # 컬럼 정보 조회
+            columns = get_data(f"DESCRIBE {table_name}")
+            for col in columns:
+                # Field(컬럼명), Type(타입) 정보만 추출
+                schema_text += f"- {col['Field']} ({col['Type']})\n"
+                
+        return schema_text.strip()
+    except Exception as e:
+        return f"스키마 조회 실패: {e}"
+
+# --- SQL 청소 함수 (기존 유지) ---
 def clean_sql_query(text: str) -> str:
-    """LLM이 뱉은 SQL에서 불필요한 마크다운이나 접두어를 제거합니다."""
     text = text.strip()
     if text.startswith("SQLQuery:"):
         text = text.replace("SQLQuery:", "").strip()
     if "```" in text:
-        text = text.split("```")[1]
-        if text.lower().startswith("sql"):
-            text = text[3:]
+        parts = text.split("```")
+        # 백틱이 여러 개일 경우를 대비해 가장 긴 내용을 코드 블록으로 간주하거나, sql 태그 확인
+        for part in parts:
+            if part.lower().strip().startswith("sql"):
+                text = part.strip()[3:].strip()
+                break
+            elif len(part) > 20 and "select" in part.lower(): # 간단한 휴리스틱
+                text = part.strip()
     return text.strip()
 
-# --- [변경점 1] create_sql_query_chain을 대체하는 순수 LCEL 체인 ---
-# DB 스키마(테이블 정보)를 가져오는 함수
-def get_schema(_):
-    return db.get_table_info()
+# --- [변경] 쿼리 실행 래퍼 함수 ---
+def run_db_query(query):
+    try:
+        # handle_sql의 get_data 사용 (결과는 딕셔너리 리스트)
+        result = get_data(query)
+        if not result:
+            return "검색 결과가 없습니다."
+        return str(result) # LLM에게 텍스트로 전달하기 위해 문자열 변환
+    except Exception as e:
+        return f"SQL 실행 오류: {e}"
 
-# SQL 생성을 위한 프롬프트 템플릿 작성
-sql_prompt = PromptTemplate.from_template(
-    """You are a {dialect} expert. Given an input question, create a syntactically correct {dialect} query to run.
-    Here is the relevant table info: 
-    {table_info}
-    
-    Question: {question}
-    SQL Query:"""
-)
+# 3. 프롬프트 정의
 
-# 데이터베이스 정보(스키마, 방언)를 프롬프트에 주입하고 LLM을 호출하여 SQL을 생성하는 체인
-generate_query = (
-    RunnablePassthrough.assign(
-        table_info=get_schema,
-        dialect=lambda _: db.dialect
-    )
-    | sql_prompt
-    | llm
-    | StrOutputParser()
+# (1) Text-to-SQL 프롬프트
+# 스키마 정보를 동적으로 주입받습니다.
+sql_gen_template = """
+You are a MySQL expert. 
+Based on the provided database schema, write a SQL query to answer the user's question.
+
+[Schema]
+{schema}
+
+[Rules]
+1. Output ONLY the SQL query. 
+2. Do not explain anything.
+3. Use CURDATE() for 'today' or 'recent'.
+
+Question: {question}
+SQL Query:
+"""
+sql_gen_prompt = PromptTemplate.from_template(sql_gen_template)
+
+# (2) 최종 답변 프롬프트 (기존 유지)
+answer_template = """
+Given the following user question, corresponding SQL query, and SQL result, answer the user question.
+
+[Rules]
+1. You MUST use the **actual values** from the [SQL Result].
+2. If there are multiple records, list them with bullet points.
+3. Format numbers with commas (e.g., 15,000원).
+4. Answer in Korean naturally.
+
+Question: {question}
+SQL Query: {query}
+SQL Result: {result}
+Answer: 
+"""
+answer_prompt = PromptTemplate.from_template(answer_template)
+
+# 4. 전체 파이프라인 연결 (Chain)
+
+# 스키마는 실행 시점에 한 번 로딩하여 컨텍스트에 고정하거나, 매번 로딩할 수 있습니다.
+# 여기서는 매 호출마다 최신 스키마를 반영하도록 lambda 사용 가능하지만,
+# 성능을 위해 전역 변수처럼 처리하거나 RunnableLambda로 감쌀 수 있습니다.
+# 간단하게 chain 구성 시점에 가져오도록 합니다 (DB 구조가 자주 안 바뀐다고 가정).
+current_schema = get_schema_info()
+
+# Step 1: SQL 생성 체인
+sql_chain = (
+    RunnablePassthrough.assign(schema=lambda x: current_schema) 
+    | sql_gen_prompt 
+    | llm 
+    | StrOutputParser() 
     | clean_sql_query
 )
 
-# --- [변경점 2] 전체 파이프라인 연결 ---
-execute_query = QuerySQLDatabaseTool(db=db)
-
-answer_prompt = PromptTemplate.from_template(
-    """Given the following user question, corresponding SQL query, and SQL result, answer the user question.
-
-    [Rules]
-    1. You MUST use the **actual values** from the [SQL Result].
-    2. Do NOT use placeholders like "[SQL Result]" or "provided data".
-    3. If there are multiple records, list them with bullet points.
-    4. Format numbers with commas (e.g., 15,000원) and convert dates to a readable format.
-    5. Answer in Korean naturally.
-
-    Question: {question}
-    SQL Query: {query}
-    SQL Result: {result}
-    Answer: """
-)
-
-# 최종 체인 조립 (중복되던 clean_sql_query는 generate_query 내부로 이동시켰습니다)
-chain = (
-    RunnablePassthrough.assign(query=generate_query).assign(
-        result=itemgetter("query") | execute_query
-    )
+# Step 2: 전체 응답 체인
+full_chain = (
+    RunnablePassthrough.assign(query=sql_chain)
+    .assign(result=lambda x: run_db_query(x["query"]))
     | answer_prompt
     | llm
     | StrOutputParser()
 )
 
-# 중복 선언된 함수 제거 및 정리
+# --- 외부 호출용 함수 ---
 def get_sql_answer(question):
     try:
-        response = chain.invoke({"question": question})
+        response = full_chain.invoke({"question": question})
         return response
     except Exception as e:
         return f"데이터 조회 중 오류가 발생했습니다: {e}"
 
 if __name__ == "__main__":
-    print(f"결과 1: {get_sql_answer('내 월급통장 잔액이 얼마야?')}")
-    print(f"결과 2: {get_sql_answer('최근에 식비로 얼마 썼어?')}")
-    print(f"결과 3: {get_sql_answer('가입된 사용자가 총 몇 명이야?')}")
+    print(f"Schema Info Check:\n{current_schema}\n")
+    print("-" * 50)
+    print(f"Q: 내 월급통장 잔액이 얼마야?")
+    print(f"A: {get_sql_answer('내 월급통장 잔액이 얼마야?')}")

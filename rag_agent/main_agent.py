@@ -109,25 +109,38 @@ def run_fintech_agent(question):
     # --- Step 3: 전문가 호출 (Agent Execution) ---
     if category == "DATABASE":
         print("🏦 [System] 은행 직원(SQL Agent) 연결 중...")
+        # 개인 데이터 조회는 기존 방식 유지
         korean_answer = get_sql_answer(korean_query)
         
     elif category == "KNOWLEDGE":
         print("🎓 [System] 금융 교수(FinRAG Agent) 연결 중...")
-        korean_answer = get_rag_answer(korean_query)
+        # [수정] 원문(question)과 번역문(korean_query)을 함께 전달하여 시연용 리포트 생성
+        korean_answer = get_rag_answer(korean_query, original_query=question)
     
     else:
-        korean_answer = "죄송합니다. 질문의 의도를 파악하지 못했습니다."
+        # 가드레일: 의도 파악 불가 시 재질문 유도
+        korean_answer = "죄송하지만, 요청하신 내용은 제가 도와드릴 수 있는 금융이나 한국 생활 범위를 벗어나는 것 같아요. 다른 궁금한 점이 있으신가요?"
 
-    print(f"🤖 [Internal Answer (KR)]: {korean_answer}")
-
-    # --- Step 4: 최종 답변 역번역 (Output Translation) ---
-    # 사용자가 한국인이 아니면 답변을 번역해서 줍니다.
+    # --- Step 4: 최종 답변 구성 (발표 및 시연용) ---
+    # 사용자가 한국인이 아닐 경우 (외국어 감지 시)
     if "Korean" not in source_lang and "한국어" not in source_lang:
-        print(f"🔄 [Translator] 답변을 {source_lang}(으)로 번역 중...")
-        final_answer = re_translation_chain.invoke({
+        print(f"🔄 [Translator] 시연을 위한 한국어 번역본 생성 중...")
+        
+        # 1. 외국인을 위한 원문 답변 (Source Language)
+        foreign_answer = re_translation_chain.invoke({
             "target_language": source_lang, 
             "korean_answer": korean_answer
         })
+        
+        # 2. 두 버전을 합쳐서 하나의 결과로 만듦
+        final_answer = f"""
+{foreign_answer}
+
+=========================================
+📢 [한국어 번역본 / Demo Translation]
+{korean_answer}
+=========================================
+"""
     else:
         # 한국어 사용자라면 그대로 출력
         final_answer = korean_answer
