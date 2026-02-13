@@ -130,10 +130,30 @@ full_chain = (
 # --- 외부 호출용 함수 ---
 def get_sql_answer(question):
     try:
-        response = full_chain.invoke({"question": question})
-        return response
+        print(f"\n🔍 [SQL Agent] 질문 분석 시작: {question}")
+
+        # 1. SQL 생성
+        generated_sql = sql_chain.invoke({"question": question})
+        print(f"📝 [Generated SQL]: {generated_sql}")  # <--- SQL 출력 추가
+
+        # 2. DB 조회
+        sql_result = run_db_query(generated_sql)
+        print(f"📊 [SQL Result]: {sql_result}")       # <--- 조회 결과 출력 추가
+
+        # 3. 최종 답변 생성
+        final_response = full_chain.invoke({
+            "question": question,
+            "query": generated_sql,
+            "result": sql_result
+        })
+        
+        print(f"💬 [SQL Answer]: {final_response}")   # <--- 최종 답변 출력 추가
+        return final_response
+
     except Exception as e:
-        return f"데이터 조회 중 오류가 발생했습니다: {e}"
+        error_msg = f"데이터 조회 중 오류가 발생했습니다: {e}"
+        print(f"❌ [Error]: {error_msg}")
+        return error_msg
 
 if __name__ == "__main__":
     print(f"Schema Info Check:\n{current_schema}\n")

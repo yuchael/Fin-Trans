@@ -69,6 +69,14 @@ def get_rag_answer(korean_query, original_query=None):
 
     # 1. 문서 검색
     relevant_docs = search_docs(korean_query, top_k=3)
+
+    # [추가] 검색된 문서 정보 출력
+    if not relevant_docs.empty:
+        print("📑 [Retrieved Docs]:")
+        for idx, row in relevant_docs.iterrows():
+            print(f"   - {row['word']} (유사도: {row['similarity']:.3f})")
+    else:
+        print("⚠️ [Retrieved Docs]: 검색 결과 없음")
     
     # 2. 컨텍스트 및 출처(Citation) 구성
     context_text = ""

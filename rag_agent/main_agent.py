@@ -1,24 +1,28 @@
 import os
-import json  # [수정] json 모듈 임포트 추가
+import json
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+# [중요] 최신 버전에 맞게 classic 사용 (환경에 따라 community일 수도 있음)
+from langchain_classic.memory import ConversationSummaryMemory 
 
-# 우리가 만든 두 전문가(모듈)를 불러옵니다.
+# 우리가 만든 두 전문가(모듈)
 from rag_agent.sql_agent import get_sql_answer
 from rag_agent.finrag_agent import get_rag_answer
 
 # 환경 변수 로드
 load_dotenv()
 
-# LLM 설정
+# LLM 설정 (똑똑한 모델 추천)
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+# 메모리 초기화
+memory = ConversationSummaryMemory(llm=llm)
 
 # ---------------------------------------------------------
 # 1. 언어 감지 및 한국어 번역 체인
 # ---------------------------------------------------------
-# [수정 포인트] JSON 예시의 중괄호 {}를 {{ }}로 변경하여 이스케이프 처리함
 translation_template = """
 You are a professional translator for a financial AI assistant.
 Your task is to analyze the User's Input and:
@@ -37,20 +41,51 @@ JSON Output:
 translation_prompt = PromptTemplate.from_template(translation_template)
 translation_chain = translation_prompt | llm | StrOutputParser()
 
+# ---------------------------------------------------------
+# [UPGRADE] 1.5. 문맥 보정(Refinement) 체인 - 프롬프트 강화
+# ---------------------------------------------------------
+# 단순히 "rephrase" 하라고 하면 "2번"을 그대로 둡니다.
+# "지시어(Demonstrative pronouns)"와 "순서(Ordinals)"를 해결하라고 명시해야 합니다.
+refinement_template = """
+You are a 'Context Resolver' for a financial AI.
+Your goal is to rewrite the 'Follow-up Question' into a 'Standalone Question' that can be understood without the chat history.
+
+[Context (Summary of previous conversation)]
+{history}
+
+[Current Follow-up Question]
+{question}
+
+[Instructions]
+1. If the user uses pronouns like "that", "it", "the previous one" (그거, 아까 말한 거), replace them with the specific noun from the Context.
+2. If the user refers to a list item like "Number 2", "The second one" (2번, 두 번째), identify what the second item was in the Context and replace it.
+3. If the question is already clear, output it exactly as is.
+4. Output ONLY the rewritten question in Korean. Do not explain.
+
+[Example]
+Context: The AI explained 'Spread', 'Interest Rate Futures', and 'Fixed Rate'.
+Question: Tell me more about the second one.
+Rewritten: 금리선물에 대해 더 자세히 알려줘.
+
+Standalone Question (Korean):
+"""
+refinement_prompt = PromptTemplate.from_template(refinement_template)
+refinement_chain = refinement_prompt | llm | StrOutputParser()
+
 
 # ---------------------------------------------------------
-# 2. 의도 분류 체인 (Router)
+# [UPGRADE] 2. 의도 분류 체인 (Router) - GENERAL 추가
 # ---------------------------------------------------------
 router_template = """
-Given the user's question (in Korean), classify it into one of the two categories: 'DATABASE' or 'KNOWLEDGE'.
+Given the user's question (in Korean), classify it into one of the three categories: 'DATABASE', 'KNOWLEDGE', or 'GENERAL'.
 
 [Definitions]
-- **DATABASE**: 개인 금융 데이터, 계좌 잔액, 거래 내역, 이체 기록 등 나만의 정보 조회. (예: "내 잔액 얼마야?", "어제 얼마 썼어?")
-- **KNOWLEDGE**: 일반적인 금융 용어, 경제 개념, 정의, 은행 업무 절차 등 지식 검색. (예: "인플레이션이 뭐야?", "SWIFT 코드가 뭐야?", "적금 추천해줘")
+- **DATABASE**: User asks about *personal* data. (e.g., "내 잔액 얼마?", "거래 내역 보여줘", "얼마 썼어?")
+- **KNOWLEDGE**: User asks about *financial concepts*, definitions, or products. (e.g., "가산금리가 뭐야?", "적금 추천", "환율 알려줘")
+- **GENERAL**: Greetings, thanks, closing remarks, or simple small talk NOT related to finance. (e.g., "안녕", "고마워", "넌 누구니?", "방가방가")
 
 [Rule]
-- Output ONLY one word: 'DATABASE' or 'KNOWLEDGE'.
-- Do not add any explanation.
+- Output ONLY one word: 'DATABASE', 'KNOWLEDGE', or 'GENERAL'.
 
 Question: {question}
 Category:
@@ -60,7 +95,24 @@ router_chain = router_prompt | llm | StrOutputParser()
 
 
 # ---------------------------------------------------------
-# 3. 최종 답변 역번역 체인 (한국어 -> 사용자 언어)
+# [NEW] 2.5 일상 대화(General) 처리 체인
+# ---------------------------------------------------------
+general_template = """
+You are a friendly and polite Financial AI Assistant named 'FinBot'.
+The user said: "{question}"
+
+Please respond naturally and politely in Korean.
+If the user greets you, greet them back and ask how you can help with their financial questions.
+If they say thanks, say "You're welcome."
+
+Response:
+"""
+general_prompt = PromptTemplate.from_template(general_template)
+general_chain = general_prompt | llm | StrOutputParser()
+
+
+# ---------------------------------------------------------
+# 3. 최종 답변 역번역 체인
 # ---------------------------------------------------------
 re_translation_template = """
 You are a professional translator.
@@ -82,9 +134,7 @@ def run_fintech_agent(question):
     
     # --- Step 1: 언어 감지 및 한국어 번역 ---
     try:
-        # JSON 형태의 문자열을 받아서 파싱
         trans_result_str = translation_chain.invoke({"question": question}).strip()
-        # 혹시 모를 마크다운('''json ... ''') 제거 처리
         trans_result_str = trans_result_str.replace("```json", "").replace("```", "")
         trans_result = json.loads(trans_result_str)
         
@@ -95,44 +145,75 @@ def run_fintech_agent(question):
         
     except Exception as e:
         print(f"⚠️ 번역 오류 발생: {e}")
-        # 오류 시 기본값 설정 (한국어로 가정)
         source_lang = "Korean"
         korean_query = question
 
+    # --- Step 1.5: 메모리를 활용한 질문 구체화 (Refinement) ---
+    history = memory.load_memory_variables({})['history']
+    refined_query = korean_query # 기본값
+    
+    # 메모리가 있을 때만 Refinement 수행
+    if history:
+        # 일상적인 인사("안녕") 같은 짧은 말은 Refinement를 거치면 오히려 이상해질 수 있으나,
+        # 문맥 파악을 위해 일단 수행하되, Router에서 GENERAL로 빠지면 괜찮습니다.
+        print(f"🧠 [Memory Summary]: {history}")
+        
+        refined_query = refinement_chain.invoke({
+            "history": history,
+            "question": korean_query
+        }).strip()
+        
+        if refined_query != korean_query:
+            print(f"✨ [Refinement] '{korean_query}' -> '{refined_query}'")
+
     # --- Step 2: 의도 파악 (Router) ---
-    # 번역된 'korean_query'를 라우터에 넣습니다.
-    category = router_chain.invoke({"question": korean_query}).strip()
+    category = router_chain.invoke({"question": refined_query}).strip()
+    # 혹시 모를 특수문자 제거
+    category = category.replace("'", "").replace('"', "")
+    
     print(f"🕵️ [Router] 의도 분석 결과: [{category}]")
     
     korean_answer = ""
     
     # --- Step 3: 전문가 호출 (Agent Execution) ---
     if category == "DATABASE":
-        print("🏦 [System] 은행 직원(SQL Agent) 연결 중...")
-        # 개인 데이터 조회는 기존 방식 유지
-        korean_answer = get_sql_answer(korean_query)
+        print("\n=== 🏦 SQL Agent 호출 ===")
+        korean_answer = get_sql_answer(refined_query)
+        print("=== 🏦 SQL Agent 종료 ===\n")
         
     elif category == "KNOWLEDGE":
-        print("🎓 [System] 금융 교수(FinRAG Agent) 연결 중...")
-        # [수정] 원문(question)과 번역문(korean_query)을 함께 전달하여 시연용 리포트 생성
-        korean_answer = get_rag_answer(korean_query, original_query=question)
-    
+        print("\n=== 🎓 FinRAG Agent 호출 ===")
+        # [중요] RAG에게는 '정제된 질문(refined_query)'을 던져야 정확도가 올라갑니다.
+        # 하지만 출력용 'original_query'는 사용자 원본을 유지합니다.
+        korean_answer = get_rag_answer(refined_query, original_query=question)
+        print("=== 🎓 FinRAG Agent 종료 ===\n")
+        
+    elif category == "GENERAL":
+        print("\n=== 💬 General Chat 호출 ===")
+        korean_answer = general_chain.invoke({"question": korean_query})
+        print("=== 💬 General Chat 종료 ===\n")
+        
     else:
-        # 가드레일: 의도 파악 불가 시 재질문 유도
-        korean_answer = "죄송하지만, 요청하신 내용은 제가 도와드릴 수 있는 금융이나 한국 생활 범위를 벗어나는 것 같아요. 다른 궁금한 점이 있으신가요?"
+        # Fallback
+        korean_answer = "죄송해요, 제가 이해하기 어려운 질문이네요. 금융 정보나 개인 자산에 대해 물어봐 주세요."
+        print(f"❌ [Exception] 처리 불가 카테고리: {category}")
+
+    # --- Step 3.5: 대화 내용 메모리에 저장 ---
+    # 중요: 저장할 때는 '정제된 질문'과 '답변'을 저장해야 다음 요약이 정확해집니다.
+    memory.save_context(
+        {"input": refined_query}, 
+        {"output": korean_answer}
+    )
 
     # --- Step 4: 최종 답변 구성 (발표 및 시연용) ---
-    # 사용자가 한국인이 아닐 경우 (외국어 감지 시)
     if "Korean" not in source_lang and "한국어" not in source_lang:
         print(f"🔄 [Translator] 시연을 위한 한국어 번역본 생성 중...")
         
-        # 1. 외국인을 위한 원문 답변 (Source Language)
         foreign_answer = re_translation_chain.invoke({
             "target_language": source_lang, 
             "korean_answer": korean_answer
         })
         
-        # 2. 두 버전을 합쳐서 하나의 결과로 만듦
         final_answer = f"""
 {foreign_answer}
 
@@ -142,7 +223,6 @@ def run_fintech_agent(question):
 =========================================
 """
     else:
-        # 한국어 사용자라면 그대로 출력
         final_answer = korean_answer
 
     return final_answer
