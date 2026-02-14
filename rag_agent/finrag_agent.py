@@ -1,27 +1,43 @@
 import os
 from pathlib import Path
-from openai import OpenAI
 from dotenv import load_dotenv
 
-# [변경] ChromaDB 및 LangChain 관련 라이브러리 임포트
+# LangChain 관련 라이브러리
 from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # 1. 환경 설정
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# 전역 변수 (ChromaDB VectorStore)
-vectorstore = None
 
 # 경로 설정
 CURRENT_FILE_PATH = Path(__file__).resolve() 
 PROJECT_ROOT = CURRENT_FILE_PATH.parent.parent 
-PROMPT_PATH = PROJECT_ROOT / "utils" / "system_prompt.md" 
+PROMPT_DIR = CURRENT_FILE_PATH.parent / "prompt" / "finrag"
 
-# [변경] ChromaDB 데이터 경로 (../data/financial_terms)
+# ChromaDB 데이터 경로
 CHROMA_DB_PATH = PROJECT_ROOT / "data" / "financial_terms"
 COLLECTION_NAME = "financial_terms"
+
+# [설정] 검색 품질을 위한 임계값 (Threshold)
+# 거리(Distance) 기준이므로, 이 값보다 '작아야' 유사한 문서입니다.
+# L2 Distance 기준: 0.5 ~ 0.8 사이 권장 (데이터 분포에 따라 조절 필요)
+SIMILARITY_THRESHOLD = 0.6
+
+# 전역 변수
+vectorstore = None
+llm = ChatOpenAI(model="gpt-5-mini")
+
+def load_prompt(filename: str) -> str:
+    """MD 파일을 읽어서 문자열로 반환하는 함수"""
+    file_path = PROMPT_DIR / filename
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        print(f"❌ [Error] 프롬프트 파일을 찾을 수 없습니다: {file_path}")
+        return "{context}\n{question}"
 
 def load_knowledge_base():
     """ChromaDB 연결 설정"""
@@ -30,52 +46,43 @@ def load_knowledge_base():
 
     print("⏳ [RAG] ChromaDB 연결 중...")
     try:
-        # 임베딩 모델 설정 (저장할 때 사용한 모델과 동일해야 함)
         embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
         
-        # 저장된 DB 로드
+        # [변경] 거리 측정 방식 변경 (cosine -> l2)
+        # 주의: DB를 새로 생성해야 완벽하게 적용됩니다.
         vectorstore = Chroma(
             persist_directory=str(CHROMA_DB_PATH),
             embedding_function=embeddings,
             collection_name=COLLECTION_NAME,
-            collection_metadata={"hnsw:space": "cosine"}
+            collection_metadata={"hnsw:space": "l2"} 
         )
-        print(f"✅ ChromaDB 연결 완료 (경로: {CHROMA_DB_PATH})")
+        print(f"✅ ChromaDB 연결 완료 (Metirc: L2, 경로: {CHROMA_DB_PATH})")
         
     except Exception as e:
         print(f"❌ ChromaDB 연결 오류: {e}")
         vectorstore = None
 
-def read_prompt_file():
-    """MD 파일에서 시스템 프롬프트 읽기"""
-    try:
-        with open(PROMPT_PATH, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return "You are a helpful assistant." # 파일 없을 시 기본값
-
-# 🔥 핵심 함수: ChromaDB 검색으로 변경
-# finrag_agent.py 내부
-
 def get_rag_answer(korean_query, original_query=None):
     if vectorstore is None: load_knowledge_base()
 
+    # 1. 문서 검색 (Score 포함)
     relevant_docs = []
-    
-    # 1. 문서 검색
     if vectorstore:
-        results = vectorstore.similarity_search_with_score(korean_query, k=3)
-        relevant_docs = results
-    
-    # 검색된 문서 정보 출력 (디버깅용)
-    if relevant_docs:
-        print("📑 [Retrieved Docs]:")
-        for doc, score in relevant_docs:
-            # 거리(Distance)를 유사도(Similarity)로 변환하여 출력 (1 - distance)
-            similarity = 1 - score
-            print(f"   - {doc.metadata.get('word', 'Unknown')} (유사도: {similarity:.4f})")
-    else:
-        print("⚠️ [Retrieved Docs]: 검색 결과 없음")
+        # 넉넉하게 5개를 가져온 뒤 필터링
+        results = vectorstore.similarity_search_with_score(korean_query, k=5)
+        
+        # [추가] Threshold 필터링 로직
+        print(f"🔍 [Search] '{korean_query}' 검색 결과 (Threshold: {SIMILARITY_THRESHOLD})")
+        for doc, score in results:
+            # L2 Distance는 0에 가까울수록 유사함
+            if score <= SIMILARITY_THRESHOLD:
+                relevant_docs.append((doc, score))
+                print(f"   ✅ 채택: {doc.metadata.get('word')} (거리: {score:.4f})")
+            else:
+                print(f"   ❌ 제외: {doc.metadata.get('word')} (거리: {score:.4f} > {SIMILARITY_THRESHOLD})")
+        
+        # 상위 3개만 사용
+        relevant_docs = relevant_docs[:3]
     
     # 2. 컨텍스트 및 출처(Citation) 구성
     context_text = ""
@@ -83,40 +90,36 @@ def get_rag_answer(korean_query, original_query=None):
     
     if relevant_docs:
         for doc, score in relevant_docs:
+            # L2 거리일 때는 유사도(%) 표현이 애매하므로 거리값 자체를 표기하거나 생략
+            # 여기서는 편의상 거리(Distance)를 그대로 표시합니다.
+            
             word = doc.metadata.get("word", "Term")
-            raw_content = doc.page_content  # "더블딥: 경기침체가..." 형태
+            raw_content = doc.page_content
             
-            # 🛠️ [수정 포인트] 내용에서 "단어: " 부분 제거하기
-            # 저장할 때 "Word: Definition" 형식으로 저장했으므로, 첫 번째 콜론(:) 뒤만 씁니다.
-            if ":" in raw_content:
-                definition = raw_content.split(":", 1)[1].strip()
-            else:
-                definition = raw_content
+            definition = raw_content.split(":", 1)[1].strip() if ":" in raw_content else raw_content
             
-            # 컨텍스트 구성
-            context_text += f"Term: {word}\nDefinition: {definition}\n\n"
+            context_text += f"- **{word}**: {definition}\n"
+            citations.append(f"- **{word}**: {definition[:60]}... (거리: {score:.4f})")
             
-            # 출처 구성 (유사도 계산 포함)
-            similarity = 1 - score
-            citations.append(f"- **{word}**: {definition[:50]}... (유사도: {similarity:.2f})")
     else:
-        context_text = "관련된 DB 정보가 없습니다. 일반적인 지식을 활용하세요."
-        citations.append("- 검색된 관련 문서가 없습니다.")
+        print("⚠️ [Retrieved Docs]: 유효한 검색 결과 없음 (Threshold 미달)")
+        context_text = "" 
+        citations.append("- 관련된 내부 데이터가 없습니다 (검색 기준 미달).")
 
-    # 3. 프롬프트 로딩 및 구성
-    system_template = read_prompt_file()
-    formatted_system_prompt = system_template.format(context=context_text)
+    # 3. 프롬프트 로딩 및 체인 생성
+    system_template = load_prompt("finrag_01_system.md")
+    rag_prompt = PromptTemplate.from_template(system_template)
+    rag_chain = rag_prompt | llm | StrOutputParser()
 
     # 4. LLM 호출
-    response = client.chat.completions.create(
-        model="gpt-5-mini",
-        messages=[
-            {"role": "system", "content": formatted_system_prompt},
-            {"role": "user", "content": f"질문에 대해 초등학생 선생님처럼 핵심만 짧게 답변해 주세요: {korean_query}"}
-        ]
-    )
-    
-    ai_answer = response.choices[0].message.content.strip()
+    try:
+        # 검색 결과가 없으면(context_text가 비었으면) 프롬프트에서 Fallback 처리가 되도록 유도
+        ai_answer = rag_chain.invoke({
+            "context": context_text if context_text else "검색된 문서가 없습니다.",
+            "question": korean_query
+        })
+    except Exception as e:
+        ai_answer = f"죄송합니다. 답변 생성 중 오류가 발생했습니다. ({e})"
 
     # 5. 최종 출력 포맷팅
     final_output = f"""
@@ -124,7 +127,7 @@ def get_rag_answer(korean_query, original_query=None):
 - **Original**: {original_query if original_query else korean_query}
 - **Translated**: {korean_query}
 
-### 💡 선생님의 답변
+### 💡 FinBot의 답변
 {ai_answer}
 
 ---
@@ -136,5 +139,5 @@ def get_rag_answer(korean_query, original_query=None):
 
 if __name__ == "__main__":
     load_knowledge_base()
-    # 테스트 실행
-    print(get_rag_answer("집을 구하려면 어떻게 해야해?", "How can I find a house?"))
+    # 테스트
+    print(get_rag_answer("금리가 뭐야?"))

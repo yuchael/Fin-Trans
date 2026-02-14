@@ -48,8 +48,7 @@ client = chromadb.PersistentClient(path=PERSIST_DIRECTORY)
 # 컬렉션 가져오기 또는 생성
 collection = client.get_or_create_collection(
     name=COLLECTION_NAME,
-    embedding_function=openai_ef,
-    metadata={"hnsw:space": "cosine"}
+    embedding_function=openai_ef
 )
 
 def sync_mysql_to_chroma():
