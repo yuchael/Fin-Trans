@@ -33,6 +33,9 @@ Your task is to extract transfer details from the user's natural language input 
 - Input: "이민수씨께 3000원 줘"
   Output: {{ "target": "이민수", "amount": 3000, "currency": "KRW" }}
 
+- Input: "엄마한테 만동 보내줘"
+  Output: {{ "target": "엄마", "amount": 10000, "currency": "VND" }}
+
 # User Input
 {question}
 
