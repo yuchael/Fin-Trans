@@ -13,31 +13,26 @@ load_dotenv()
 # 2. LLM 설정
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-# --- [추가] 동적 스키마 조회 함수 ---
-# LangChain의 SQLDatabase 대신, 직접 현재 DB의 테이블 정보를 문자열로 만들어줍니다.
-def get_schema_info():
+def get_schema_info(allowed_views: list):
     try:
-        # 테이블 목록 조회
-        tables = get_data("SHOW TABLES")
         schema_text = ""
-        
-        for table in tables:
-            # 딕셔너리 값 중 첫 번째가 테이블 이름 (Key는 'Tables_in_dbName' 등으로 가변적)
-            table_name = list(table.values())[0]
-            schema_text += f"\n[Table: {table_name}]\n"
-            
-            # 컬럼 정보 조회
-            columns = get_data(f"DESCRIBE {table_name}")
+
+        for view_name in allowed_views:
+            schema_text += f"\n[View: {view_name}]\n"
+
+            columns = get_data(f"DESCRIBE {view_name}")
             for col in columns:
-                # Field(컬럼명), Type(타입) 정보만 추출
                 schema_text += f"- {col['Field']} ({col['Type']})\n"
-                
+
         return schema_text.strip()
+
     except Exception as e:
         return f"스키마 조회 실패: {e}"
 
+
 # --- SQL 청소 함수 (기존 유지) ---
 def clean_sql_query(text: str) -> str:
+    print(text)
     text = text.strip()
     if text.startswith("SQLQuery:"):
         text = text.replace("SQLQuery:", "").strip()
@@ -53,7 +48,7 @@ def clean_sql_query(text: str) -> str:
     return text.strip()
 
 # --- [변경] 쿼리 실행 래퍼 함수 ---
-def run_db_query(query):
+def run_db_query(query, username):
     try:
         # handle_sql의 get_data 사용 (결과는 딕셔너리 리스트)
         result = get_data(query)
@@ -103,15 +98,9 @@ answer_prompt = PromptTemplate.from_template(answer_template)
 
 # 4. 전체 파이프라인 연결 (Chain)
 
-# 스키마는 실행 시점에 한 번 로딩하여 컨텍스트에 고정하거나, 매번 로딩할 수 있습니다.
-# 여기서는 매 호출마다 최신 스키마를 반영하도록 lambda 사용 가능하지만,
-# 성능을 위해 전역 변수처럼 처리하거나 RunnableLambda로 감쌀 수 있습니다.
-# 간단하게 chain 구성 시점에 가져오도록 합니다 (DB 구조가 자주 안 바뀐다고 가정).
-current_schema = get_schema_info()
-
 # Step 1: SQL 생성 체인
 sql_chain = (
-    RunnablePassthrough.assign(schema=lambda x: current_schema) 
+    RunnablePassthrough.assign(schema=lambda x: get_schema_info(x["allowed_views"])) 
     | sql_gen_prompt 
     | llm 
     | StrOutputParser() 
@@ -121,22 +110,24 @@ sql_chain = (
 # Step 2: 전체 응답 체인
 full_chain = (
     RunnablePassthrough.assign(query=sql_chain)
-    .assign(result=lambda x: run_db_query(x["query"]))
+    .assign(result=lambda x: run_db_query(x["query"], x["username"]))
     | answer_prompt
     | llm
     | StrOutputParser()
 )
 
 # --- 외부 호출용 함수 ---
-def get_sql_answer(question):
+def get_sql_answer(question, username, allowed_views):
     try:
-        response = full_chain.invoke({"question": question})
+        response = full_chain.invoke({
+            "question": question, 
+            "username": username,
+            "allowed_views": allowed_views
+            })
         return response
     except Exception as e:
         return f"데이터 조회 중 오류가 발생했습니다: {e}"
 
 if __name__ == "__main__":
-    print(f"Schema Info Check:\n{current_schema}\n")
-    print("-" * 50)
     print(f"Q: 내 월급통장 잔액이 얼마야?")
     print(f"A: {get_sql_answer('내 월급통장 잔액이 얼마야?')}")

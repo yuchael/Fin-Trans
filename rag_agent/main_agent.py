@@ -8,6 +8,7 @@ from langchain_core.output_parsers import StrOutputParser
 # 우리가 만든 두 전문가(모듈)를 불러옵니다.
 from rag_agent.sql_agent import get_sql_answer
 from rag_agent.finrag_agent import get_rag_answer
+from rag_agent.transfer_agent import get_transfer_answer
 
 # 환경 변수 로드
 load_dotenv()
@@ -42,14 +43,15 @@ translation_chain = translation_prompt | llm | StrOutputParser()
 # 2. 의도 분류 체인 (Router)
 # ---------------------------------------------------------
 router_template = """
-Given the user's question (in Korean), classify it into one of the two categories: 'DATABASE' or 'KNOWLEDGE'.
+Given the user's question (in Korean), classify it into one of the three categories: 'DATABASE', 'KNOWLEDGE', or "TRANSFER".
 
 [Definitions]
 - **DATABASE**: 개인 금융 데이터, 계좌 잔액, 거래 내역, 이체 기록 등 나만의 정보 조회. (예: "내 잔액 얼마야?", "어제 얼마 썼어?")
 - **KNOWLEDGE**: 일반적인 금융 용어, 경제 개념, 정의, 은행 업무 절차 등 지식 검색. (예: "인플레이션이 뭐야?", "SWIFT 코드가 뭐야?", "적금 추천해줘")
+- **TRANSFER**: 내 계좌에서 다른 계좌로 송금. (예: "철수에게 10000원 송금해줘")
 
 [Rule]
-- Output ONLY one word: 'DATABASE' or 'KNOWLEDGE'.
+- Output ONLY one word: 'DATABASE', 'KNOWLEDGE', 'TRANSFER'.
 - Do not add any explanation.
 
 Question: {question}
@@ -77,7 +79,7 @@ re_translation_chain = re_translation_prompt | llm | StrOutputParser()
 # ---------------------------------------------------------
 # 4. 메인 에이전트 실행 함수
 # ---------------------------------------------------------
-def run_fintech_agent(question):
+def run_fintech_agent(question, username, transfer_context=None, allowed_views=None):
     print(f"\n[User Input]: {question}")
     
     # --- Step 1: 언어 감지 및 한국어 번역 ---
@@ -99,6 +101,13 @@ def run_fintech_agent(question):
         source_lang = "Korean"
         korean_query = question
 
+    if transfer_context:
+        return get_transfer_answer(
+            question,
+            username,
+            context=transfer_context
+        )
+    
     # --- Step 2: 의도 파악 (Router) ---
     # 번역된 'korean_query'를 라우터에 넣습니다.
     category = router_chain.invoke({"question": korean_query}).strip()
@@ -110,13 +119,22 @@ def run_fintech_agent(question):
     if category == "DATABASE":
         print("🏦 [System] 은행 직원(SQL Agent) 연결 중...")
         # 개인 데이터 조회는 기존 방식 유지
-        korean_answer = get_sql_answer(korean_query)
+        korean_answer = get_sql_answer(korean_query, username, allowed_views)
         
     elif category == "KNOWLEDGE":
         print("🎓 [System] 금융 교수(FinRAG Agent) 연결 중...")
         # [수정] 원문(question)과 번역문(korean_query)을 함께 전달하여 시연용 리포트 생성
         korean_answer = get_rag_answer(korean_query, original_query=question)
     
+    elif category == "TRANSFER":
+        print("🎓 [System] 송금 도우미(Transfer Agent) 연결 중...")
+        transfer_result = get_transfer_answer(korean_query, username, context=None)
+
+        if isinstance(transfer_result, dict):
+            return transfer_result
+
+        korean_answer = transfer_result
+
     else:
         # 가드레일: 의도 파악 불가 시 재질문 유도
         korean_answer = "죄송하지만, 요청하신 내용은 제가 도와드릴 수 있는 금융이나 한국 생활 범위를 벗어나는 것 같아요. 다른 궁금한 점이 있으신가요?"
@@ -134,13 +152,13 @@ def run_fintech_agent(question):
         
         # 2. 두 버전을 합쳐서 하나의 결과로 만듦
         final_answer = f"""
-{foreign_answer}
+            {foreign_answer}
 
-=========================================
-📢 [한국어 번역본 / Demo Translation]
-{korean_answer}
-=========================================
-"""
+            =========================================
+            📢 [한국어 번역본 / Demo Translation]
+            {korean_answer}
+            =========================================
+        """
     else:
         # 한국어 사용자라면 그대로 출력
         final_answer = korean_answer
@@ -155,6 +173,6 @@ if __name__ == "__main__":
         if q.lower() in ["exit", "quit"]:
             break
         
-        answer = run_fintech_agent(q)
+        answer = run_fintech_agent(q, username="user_kr")
         print(f"\n📢 [Final Answer]: {answer}")
         print("-" * 50)

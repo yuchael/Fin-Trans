@@ -92,6 +92,8 @@ if 'chat_sessions' not in st.session_state:
     st.session_state['chat_sessions'] = []
 if 'user_input_text' not in st.session_state:
     st.session_state['user_input_text'] = ""
+if "transfer_context" not in st.session_state:
+    st.session_state["transfer_context"] = None
     
 # ==========================================
 # 3. 페이지 함수
@@ -147,6 +149,13 @@ def login_page():
                                 st.session_state['logged_in'] = True
                                 st.session_state['current_user'] = username
                                 st.session_state['user_name_real'] = korean_name
+                                if "transfer_context" not in st.session_state:
+                                    st.session_state["transfer_context"] = None
+
+                                from utils.create_view import create_user_views
+                                view_names = create_user_views(username)
+                                st.session_state['allowed_views'] = view_names
+
                                 st.session_state['page'] = 'chat'
                                 st.rerun()
                             else:
@@ -271,11 +280,11 @@ def chat_page():
             st.markdown(message["content"])
 
     # 2. 사용자 입력 처리
-    if prompt := st.chat_input("메시지를 입력해 주세요..."):
+    if user_input := st.chat_input("메시지를 입력해 주세요..."):
         # 사용자 메시지 저장 및 표시
-        st.session_state['messages'].append({"role": "user", "content": prompt})
+        st.session_state['messages'].append({"role": "user", "content": user_input})
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(user_input)
 
         # 3. [변경됨] Agent 호출 및 응답 처리
         with st.chat_message("assistant"):
@@ -284,8 +293,41 @@ def chat_page():
             # 처리 중임을 알리는 스피너
             with st.spinner("AI가 답변을 생성하고 있습니다..."):
                 try:
+                    if st.session_state.get("transfer_context"):
+                        result = run_fintech_agent(
+                            user_input,
+                            st.session_state['current_user'],
+                            st.session_state["transfer_context"],
+                            st.session_state['allowed_views']
+                        )
+                        
                     # main_agent.py의 함수 호출 (번역 -> 의도파악 -> 답변생성 -> 역번역)
-                    final_response = run_fintech_agent(prompt)
+                    else:
+                        result = run_fintech_agent(
+                            user_input,
+                            st.session_state['current_user'],
+                            None,
+                            st.session_state['allowed_views']
+                        )
+
+                    # transfer 상태 처리
+                    if isinstance(result, dict):
+
+                        if result.get("context"):
+                            st.session_state["transfer_context"] = result["context"]
+                        else:
+                            st.session_state["transfer_context"] = None
+
+                        final_response = result.get("message")
+
+                        # 성공 / 취소 / 실패 시 context 초기화
+                        if result.get("status") in ["SUCCESS", "CANCEL", "FAIL"]:
+                            st.session_state["transfer_context"] = None
+
+                    else:
+                        st.session_state["transfer_context"] = None
+                        final_response = result
+
                 except Exception as e:
                     final_response = f"죄송합니다. 오류가 발생했습니다: {e}"
 
