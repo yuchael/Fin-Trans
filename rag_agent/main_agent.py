@@ -18,7 +18,7 @@ from rag_agent.web_search_rag import WebSearchRAG
 load_dotenv()
 
 # LLM 설정
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+llm = ChatOpenAI(model="gpt-5-mini")
 
 # [전역 설정]
 # 1. 대화 요약 저장소 (메모리 대신 사용)

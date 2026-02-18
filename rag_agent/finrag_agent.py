@@ -32,7 +32,7 @@ WEB_SEARCH_KEYWORDS = ["현재", "최신", "오늘", "주가", "시세", "뉴스
 
 # 전역 변수
 vectorstore = None
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+llm = ChatOpenAI(model="gpt-5-mini")
 web_rag = WebSearchRAG() # 웹 검색 인스턴스 생성
 
 def load_prompt(filename: str) -> str:
