@@ -43,24 +43,24 @@ def local_css():
             box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
         }
         div.stButton > button {
-            background: linear-gradient(135deg, #6366F1 0%, #0067AC 100%);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 0.9rem !important;
+            background: #FFFFFF;
+            color: #64748B !important;
+            border: 1px solid #CBD5E1 !important;
             padding: 0.5rem 1rem !important;
             width: 100%;
         }
         div.stButton > button:hover {
+            background: #FFFFFF !important;   /* ← 추가: 빨간색 방지 */
+            color: #64748B !important;        /* ← 추가: 글자색 유지 */
             transform: translateY(-2px);
             box-shadow: 0 10px 20px -5px rgba(99, 102, 241, 0.4);
         }
         /* 보조 버튼 스타일 */
         button[kind="secondary"] {
-            background: transparent !important;
+            background: #FFFFFF;
             border: 1px solid #CBD5E1 !important;
             color: #64748B !important;
-        }
+        }        
         [data-testid="stSidebar"] { background-color: #FFFFFF; border-right: 1px solid #E2E8F0; }
         h1, h2, h3 { color: #1E293B; }
     </style>
@@ -88,6 +88,8 @@ if 'user_input_text' not in st.session_state:
     st.session_state['user_input_text'] = ""
 if "transfer_context" not in st.session_state:
     st.session_state["transfer_context"] = None
+if "last_result" not in st.session_state:
+    st.session_state["last_result"] = None
     
 # ==========================================
 # 3. 페이지 함수
@@ -235,9 +237,11 @@ def chat_page():
             </p>
         </div>
         """, unsafe_allow_html=True)
-        
+
         if st.button("✨ 새 대화 시작", use_container_width=True):
             st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋\n금융 업무부터 일상 대화까지 무엇이든 도와드릴게요."}]
+            st.session_state["transfer_context"] = None
+            st.session_state["last_result"] = None
             st.rerun()
 
         st.markdown("<div style='margin-top: auto;'></div>", unsafe_allow_html=True)
@@ -251,78 +255,102 @@ def chat_page():
 
     # --- 메인 채팅 화면 ---
     st.caption("🔒 Woori AI Service | Powered by Fin-Agent")
-    
+
     # 1. 기존 메시지 렌더링
     for message in st.session_state['messages']:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # 2. 사용자 입력 처리
+    # ★ 2. 확인 버튼 렌더링 (메시지 렌더링 직후, chat_input 이전)
+    if (
+        st.session_state.get("last_result") and
+        st.session_state["last_result"].get("ui_type") == "confirm_buttons"
+    ):
+        def handle_confirm(signal: str):
+            result = run_fintech_agent(
+                signal,
+                st.session_state['current_user'],
+                st.session_state["transfer_context"],
+                st.session_state['allowed_views']
+            )
+            if isinstance(result, dict):
+                st.session_state["transfer_context"] = result.get("context")
+                final_msg = result.get("message", "")
+                if result.get("status") in ["SUCCESS", "CANCEL", "FAIL"]:
+                    st.session_state["transfer_context"] = None
+                    st.session_state["last_result"] = None
+                else:
+                    st.session_state["last_result"] = result
+            else:
+                st.session_state["transfer_context"] = None
+                st.session_state["last_result"] = None
+                final_msg = result
+
+            st.session_state['messages'].append({"role": "assistant", "content": final_msg})
+            st.rerun()
+
+        _, col1, col2, _ = st.columns([3, 1, 1, 3])
+        with col1:
+            if st.button("✅", key="confirm_yes", type="primary", use_container_width=True):
+                handle_confirm("__YES__")
+        with col2:
+            if st.button("❌", key="confirm_no", use_container_width=True):
+                handle_confirm("__NO__")
+
+    # 3. 사용자 입력 처리
     if user_input := st.chat_input("메시지를 입력해 주세요..."):
-        # 사용자 메시지 저장 및 표시
         st.session_state['messages'].append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # 3. [변경됨] Agent 호출 및 응답 처리
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            
-            # 처리 중임을 알리는 스피너
+
             with st.spinner("AI가 답변을 생성하고 있습니다..."):
                 try:
-                    if st.session_state.get("transfer_context"):
-                        result = run_fintech_agent(
-                            user_input,
-                            st.session_state['current_user'],
-                            st.session_state["transfer_context"],
-                            st.session_state['allowed_views']
-                        )
-                        
-                    # main_agent.py의 함수 호출 (번역 -> 의도파악 -> 답변생성 -> 역번역)
-                    else:
-                        result = run_fintech_agent(
-                            user_input,
-                            st.session_state['current_user'],
-                            None,
-                            st.session_state['allowed_views']
-                        )
+                    result = run_fintech_agent(
+                        user_input,
+                        st.session_state['current_user'],
+                        st.session_state.get("transfer_context"),
+                        st.session_state['allowed_views']
+                    )
 
-                    # transfer 상태 처리
                     if isinstance(result, dict):
-
                         if result.get("context"):
                             st.session_state["transfer_context"] = result["context"]
                         else:
                             st.session_state["transfer_context"] = None
 
-                        final_response = result.get("message")
+                        # ★ 마지막 결과 저장 (버튼 렌더링 판단용)
+                        st.session_state["last_result"] = result
+                        final_response = result.get("message", "")
 
-                        # 성공 / 취소 / 실패 시 context 초기화
                         if result.get("status") in ["SUCCESS", "CANCEL", "FAIL"]:
                             st.session_state["transfer_context"] = None
-
+                            st.session_state["last_result"] = None
                     else:
                         st.session_state["transfer_context"] = None
+                        st.session_state["last_result"] = None
                         final_response = result
 
                 except Exception as e:
                     final_response = f"죄송합니다. 오류가 발생했습니다: {e}"
+                    st.session_state["last_result"] = None
 
-            # 4. 스트리밍 효과 (Fake Stream)
-            # LangChain Agent는 결과를 한 번에 주기 때문에, 
-            # UI 상 자연스럽게 보이기 위해 타자 치는 효과를 냅니다.
+            # 스트리밍 효과
             streamed_text = ""
             for char in final_response:
                 streamed_text += char
-                time.sleep(0.01) # 속도 조절
+                time.sleep(0.01)
                 message_placeholder.markdown(streamed_text + "▌")
-            
+
             message_placeholder.markdown(streamed_text)
-            
-            # 완성된 응답을 세션에 저장
             st.session_state['messages'].append({"role": "assistant", "content": streamed_text})
-            
+
+        # ★ 버튼이 필요한 경우 즉시 rerun해서 버튼을 렌더링
+        if st.session_state.get("last_result", {}) and \
+           st.session_state["last_result"].get("ui_type") == "confirm_buttons":
+            st.rerun()            
 # ==========================================
 # 4. 실행 로직
 # ==========================================

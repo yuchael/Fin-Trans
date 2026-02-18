@@ -19,7 +19,7 @@ llm = ChatOpenAI(model="gpt-5-mini")
 # [설정] 프롬프트 경로 설정 및 로딩 함수
 # ---------------------------------------------------------
 CURRENT_DIR = Path(__file__).resolve().parent
-PROMPT_DIR = CURRENT_DIR.parent /"rag_agent"/ "prompt" / "transfer"
+PROMPT_DIR = CURRENT_DIR.parent / "rag_agent" / "prompt" / "transfer"
 
 def read_prompt(filename: str) -> str:
     """MD 파일을 읽어서 문자열로 반환하는 함수"""
@@ -48,14 +48,13 @@ transfer_chain = (
 # ---------------------------------------------------------
 def parse_transfer_json(text: str):
     try:
-        # 마크다운 코드 블록 제거 처리 추가
         text = text.strip().replace("```json", "").replace("```", "")
         return json.loads(text)
     except:
         return {"target": None, "amount": None, "currency": None}
 
 # ---------------------------------------------------------
-# DB 검증 함수들 (사용자 원본 로직 유지)
+# DB 검증 함수들
 # ---------------------------------------------------------
 
 def get_member_id(username):
@@ -99,9 +98,7 @@ def get_primary_account(user_id):
     return result[0] if result else None
 
 def get_user_password(username):
-    query = f"""
-    SELECT pin_code FROM members WHERE username = '{username}'
-    """
+    query = f"SELECT pin_code FROM members WHERE username = '{username}'"
     result = get_data(query)
     return result[0]["pin_code"] if result else None
 
@@ -126,7 +123,7 @@ def update_balance(account_id, new_balance):
     execute_query(query)
 
 def insert_ledger(
-    account_id, contact_id, amount_krw, balance_after, 
+    account_id, contact_id, amount_krw, balance_after,
     exchange_rate, target_amount, target_currency
 ):
     query = f"""
@@ -142,11 +139,11 @@ def insert_ledger(
     execute_query(query)
 
 # ---------------------------------------------------------
-# 메인 송금 로직 (사용자 원본 로직 유지)
+# 메인 송금 로직
 # ---------------------------------------------------------
 
 def process_transfer(question: str, username: str, context: dict | None = None):
-    
+
     context = context or {}
 
     user_id = get_member_id(username)
@@ -154,7 +151,7 @@ def process_transfer(question: str, username: str, context: dict | None = None):
         return {"status": "ERROR", "message": "사용자를 찾을 수 없습니다."}
 
     # --------------------------------------------------
-    # 1. PIN Code 입력 단계 (비밀번호 -> PIN Code 변경)
+    # 1. PIN Code 입력 단계
     # --------------------------------------------------
     if context.get("awaiting_password"):
 
@@ -165,17 +162,15 @@ def process_transfer(question: str, username: str, context: dict | None = None):
 
         if isinstance(stored_pin, str):
             stored_pin = stored_pin.encode('utf-8')
-                            
+
         if bcrypt.checkpw(question.encode('utf-8'), stored_pin) == False:
             context["password_attempts"] = context.get("password_attempts", 0) + 1
 
             if context["password_attempts"] >= 5:
-                # [수정] 멘트 변경: 비밀번호 -> PIN Code
                 return {"status": "FAIL", "message": "PIN Code 5회 오류. 송금 실패."}
 
             return {
                 "status": "NEED_PASSWORD",
-                # [수정] 멘트 변경: 비밀번호 -> PIN Code
                 "message": f"PIN Code 오류. 남은 기회: {5 - context['password_attempts']}",
                 "context": context
             }
@@ -198,15 +193,28 @@ def process_transfer(question: str, username: str, context: dict | None = None):
             context["currency"]
         )
 
-        # [수정] 송금 완료 시 잔액(new_balance) 표기 추가
         return {"status": "SUCCESS", "message": f"송금이 완료되었습니다. (잔액: {int(new_balance):,}원)"}
 
     # --------------------------------------------------
-    # 2. 확인 단계
+    # 2. 확인 단계 (버튼 신호 + 텍스트 입력 모두 처리)
     # --------------------------------------------------
     if context.get("awaiting_confirm"):
-        if question.lower() not in ["y", "yes", "네", "응", "맞아"]:
+        yes_signals = ["__yes__", "y", "yes", "네", "응", "맞아"]
+        no_signals  = ["__no__",  "n", "no", "아니", "취소"]
+
+        answer = question.strip().lower()
+
+        if answer in no_signals:
             return {"status": "CANCEL", "message": "송금이 취소되었습니다."}
+
+        if answer not in yes_signals:
+            # 알 수 없는 입력 → 버튼 다시 표시
+            return {
+                "status": "CONFIRM",
+                "message": context.get("confirm_message", "송금을 확인해주세요."),
+                "context": context,
+                "ui_type": "confirm_buttons"
+            }
 
         context["awaiting_confirm"] = False
         context["awaiting_password"] = True
@@ -214,11 +222,10 @@ def process_transfer(question: str, username: str, context: dict | None = None):
 
         return {
             "status": "NEED_PASSWORD",
-            # [수정] 멘트 변경: 비밀번호 -> PIN Code
             "message": "PIN Code를 입력해주세요.",
             "context": context
         }
-    
+
     # --------------------------------------------------
     # 3. HITL 단계 (부족 정보 보완)
     # --------------------------------------------------
@@ -238,7 +245,6 @@ def process_transfer(question: str, username: str, context: dict | None = None):
 
         elif field == "amount":
             try:
-                # 단위 처리 등은 프롬프트가 해주지만, 여기서도 간단한 정제
                 clean_amt = question.strip().replace(",", "").replace("원", "")
                 context["amount"] = float(clean_amt)
             except:
@@ -261,18 +267,13 @@ def process_transfer(question: str, username: str, context: dict | None = None):
         raw_result = transfer_chain.invoke({"question": question})
         info = parse_transfer_json(raw_result)
 
-        target = info.get("target")
-        amount = info.get("amount")
-        currency = info.get("currency")
+        context["target"]   = info.get("target")
+        context["amount"]   = info.get("amount")
+        context["currency"] = info.get("currency")
 
-        context["target"] = target
-        context["amount"] = amount
-        context["currency"] = currency
-
-    else:
-        target = context.get("target")
-        amount = context.get("amount")
-        currency = context.get("currency")
+    target   = context.get("target")
+    amount   = context.get("amount")
+    currency = context.get("currency")
 
     # 대상 추론 및 검증
     if not target:
@@ -285,8 +286,6 @@ def process_transfer(question: str, username: str, context: dict | None = None):
         }
 
     resolved = resolve_contact_name(user_id, target)
-    if resolved:
-        context["target"] = resolved
     if not resolved:
         context["missing_field"] = "target"
         return {
@@ -295,6 +294,7 @@ def process_transfer(question: str, username: str, context: dict | None = None):
             "message": "연락처에서 찾을 수 없습니다. 정확한 이름을 입력해주세요.",
             "context": context
         }
+    context["target"] = resolved
 
     if not amount:
         context["missing_field"] = "amount"
@@ -306,8 +306,6 @@ def process_transfer(question: str, username: str, context: dict | None = None):
         }
 
     if not currency:
-        # 고도화된 프롬프트는 KRW를 기본값으로 잡을 수 있으나, 만약 null이면 물어봄
-        # 여기서 기본값 처리를 코드 레벨에서도 한 번 더 할 수 있음
         context["currency"] = "KRW"
         currency = "KRW"
 
@@ -317,7 +315,7 @@ def process_transfer(question: str, username: str, context: dict | None = None):
             "status": "ERROR",
             "message": f"{currency} 환율 정보를 찾을 수 없습니다."
         }
-    
+
     account = get_primary_account(user_id)
     if not account:
         return {"status": "ERROR", "message": "주 계좌를 찾을 수 없습니다."}
@@ -327,19 +325,23 @@ def process_transfer(question: str, username: str, context: dict | None = None):
     if amount_krw > float(account["balance"]):
         return {"status": "ERROR", "message": "잔액이 부족합니다."}
 
+    confirm_message = f"{resolved}에게 {amount} {currency} ({round(amount_krw, 2)}원) 송금하시겠습니까?"
+
     context = {
-        "target": resolved,
-        "amount": float(amount),
-        "currency": currency,
-        "amount_krw": amount_krw,
-        "exchange_rate": rate,
-        "awaiting_confirm": True
+        "target":           resolved,
+        "amount":           float(amount),
+        "currency":         currency,
+        "amount_krw":       amount_krw,
+        "exchange_rate":    rate,
+        "awaiting_confirm": True,
+        "confirm_message":  confirm_message,   # ← 재표시용 메시지 저장
     }
 
     return {
-        "status": "CONFIRM",
-        "message": f"{resolved}에게 {amount} {currency} ({round(amount_krw,2)}원) 송금하시겠습니까? (y/n)",
-        "context": context
+        "status":   "CONFIRM",
+        "message":  confirm_message,
+        "context":  context,
+        "ui_type":  "confirm_buttons"          # ← Streamlit 버튼 렌더링 트리거
     }
 
 # ---------------------------------------------------------
@@ -350,6 +352,7 @@ def get_transfer_answer(question, username, context=None):
         return process_transfer(question, username, context)
     except Exception as e:
         return f"송금 처리 중 오류가 발생했습니다: {e}"
+
 
 if __name__ == "__main__":
     print("Transfer Agent Ready")
