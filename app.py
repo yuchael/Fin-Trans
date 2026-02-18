@@ -4,7 +4,10 @@ import bcrypt
 from dotenv import load_dotenv
 
 from utils.handle_sql import get_data, execute_query
-from rag_agent.main_agent import run_fintech_agent
+# [수정] reset_global_context 추가 임포트 (백엔드 메모리 초기화용)
+from rag_agent.main_agent import run_fintech_agent, reset_global_context
+# [수정] load_knowledge_base 추가 임포트 (DB 캐싱용)
+from rag_agent.finrag_agent import load_knowledge_base
 
 load_dotenv()
 
@@ -67,6 +70,14 @@ def local_css():
     """, unsafe_allow_html=True)
 
 local_css()
+
+# [수정] ChromaDB 연결 캐싱 (앱 실행 시 한 번만 연결)
+@st.cache_resource
+def init_chroma_connection():
+    load_knowledge_base()
+    return True
+
+init_chroma_connection()
 
 # ==========================================
 # 2. 세션 상태 초기화
@@ -139,6 +150,11 @@ def login_page():
                                 st.session_state['logged_in'] = True
                                 st.session_state['current_user'] = username
                                 st.session_state['user_name_real'] = korean_name
+                                
+                                # [수정] 로그인 성공 시 이전 세션 데이터 확실하게 초기화
+                                st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋"}]
+                                st.session_state["transfer_context"] = None
+                                
                                 if "transfer_context" not in st.session_state:
                                     st.session_state["transfer_context"] = None
 
@@ -247,9 +263,19 @@ def chat_page():
         st.markdown("<div style='margin-top: auto;'></div>", unsafe_allow_html=True)
         st.markdown("---")
         if st.button("로그아웃", use_container_width=True):
+            # [수정] 백엔드 메모리 초기화
+            reset_global_context()
+            
             st.session_state['logged_in'] = False
             st.session_state['current_user'] = None
             st.session_state['user_name_real'] = None
+            
+            # [수정] 프론트엔드 대화 내역 및 컨텍스트 초기화
+            st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋"}]
+            st.session_state['transfer_context'] = None
+            st.session_state['chat_sessions'] = []
+            st.session_state['allowed_views'] = []
+            
             st.session_state['page'] = 'login'
             st.rerun()
 

@@ -12,7 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from rag_agent.sql_agent import get_sql_answer
 from rag_agent.finrag_agent import get_rag_answer
 from rag_agent.transfer_agent import get_transfer_answer
-from rag_agent.web_search_rag import WebSearchRAG  # [NEW] 웹 검색 추가
+from rag_agent.web_search_rag import WebSearchRAG
 
 # 환경 변수 로드
 load_dotenv()
@@ -23,6 +23,13 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 # [전역 설정]
 # 1. 대화 요약 저장소 (메모리 대신 사용)
 GLOBAL_CHAT_CONTEXT = {"summary": ""}
+
+# [NEW] 전역 컨텍스트 초기화 함수 (app.py에서 로그아웃 시 호출)
+def reset_global_context():
+    """전역 대화 요약 초기화"""
+    global GLOBAL_CHAT_CONTEXT
+    GLOBAL_CHAT_CONTEXT["summary"] = ""
+    print("🧹 [Memory] 전역 대화 요약이 초기화되었습니다.")
 
 # 2. 웹 검색 에이전트 인스턴스 (재사용을 위해 전역 생성)
 web_rag = WebSearchRAG()
@@ -67,7 +74,6 @@ router_chain = router_prompt | llm | StrOutputParser()
 # ---------------------------------------------------------
 # [Step 4-System] 일상 대화 (System Prompt) 처리 체인
 # ---------------------------------------------------------
-# [Fix] 파일명 수정: main_04_system_prompt.md -> main_04_system.md
 system_prompt_template = read_prompt("main_04_system.md")
 system_prompt_chain = PromptTemplate.from_template(system_prompt_template) | llm | StrOutputParser()
 
@@ -131,8 +137,9 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
     # ---------------------------------------------------------
     if transfer_context:
         print("💸 [System] 송금 진행 중... (Context 유지)")
+        # [수정] 번역된 쿼리(korean_query)를 넘겨서, 외국어 입력 시에도 송금 에이전트가 이해하도록 함
         return get_transfer_answer(
-            question, # 원본 질문(혹은 번역된 질문)을 넘김
+            korean_query, 
             username,
             context=transfer_context
         )
@@ -140,12 +147,11 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
     # --- Step 2: 질문 구체화 (Refinement) - 무조건 실행 ---
     current_history = GLOBAL_CHAT_CONTEXT["summary"]
     
-    # history가 비어있을 경우 명시적인 텍스트 전달 (LLM 혼란 방지)
+    # history가 비어있을 경우 명시적인 텍스트 전달
     history_context = current_history if current_history else "이전 대화 기록 없음(No previous conversation history)."
 
     print(f"🧠 [Memory Summary]: {history_context}")
 
-    # 무조건 실행
     refined_query = refinement_chain.invoke({
         "history": history_context,
         "question": korean_query
@@ -171,7 +177,6 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
         print("=== 🏦 SQL Agent 종료 ===\n")
         
     elif category == "KNOWLEDGE":
-        # [변경] FinRAG가 내부 DB 검색과 웹 검색을 모두 판단하여 처리함
         print("\n=== 🎓 FinRAG Agent (Hybrid) 호출 ===")
         korean_answer = get_rag_answer(refined_query, original_query=question)
         print("=== 🎓 FinRAG Agent 종료 ===\n")
@@ -183,8 +188,6 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
             return transfer_result
         korean_answer = transfer_result
         print("=== 💸 Transfer Agent 종료 ===\n")
-
-    # [삭제] WEB_SEARCH 엘리프 블록 제거됨 (KNOWLEDGE로 통합)
 
     elif category == "GENERAL":
         print("\n=== 💬 System Prompt 호출 ===")
@@ -221,15 +224,3 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
         final_answer = korean_answer
 
     return final_answer
-
-# --- 실행 테스트 ---
-if __name__ == "__main__":
-    while True:
-        q = input("\n질문을 입력하세요 (exit to quit): ")
-        if q.lower() in ["exit", "quit"]:
-            break
-        
-        # 테스트용 호출
-        answer = run_fintech_agent(q, username="user_kr")
-        print(f"\n📢 [Final Answer]: {answer}")
-        print("-" * 50)
