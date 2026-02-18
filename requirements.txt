@@ -99,7 +99,6 @@ posthog==5.4.0
 propcache==0.4.1
 protobuf==6.33.5
 pyarrow==23.0.0
-PyAudio==0.2.14
 pybase64==1.4.3
 pycparser==3.0
 pydantic==2.12.5
