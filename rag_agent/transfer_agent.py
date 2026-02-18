@@ -1,12 +1,14 @@
 import os
 import json
 from pathlib import Path
+from typing import TypedDict
 from dotenv import load_dotenv
 import bcrypt
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langgraph.graph import StateGraph, START, END
 
 # 사용자 원본 코드의 유틸리티 (DB 핸들러)
 from utils.handle_sql import get_data, execute_query
@@ -32,26 +34,47 @@ def read_prompt(filename: str) -> str:
         return ""
 
 # ---------------------------------------------------------
-# 체인 구성: 송금 정보 추출 (MD 파일 적용)
+# [LangGraph] 송금 정보 추출 그래프
 # ---------------------------------------------------------
-transfer_extract_template = read_prompt("transfer_01_extract.md")
-transfer_extract_prompt = PromptTemplate.from_template(transfer_extract_template)
+class TransferExtractState(TypedDict):
+    question: str
+    raw_llm_output: str
+    extracted: dict
 
-transfer_chain = (
-    transfer_extract_prompt
-    | llm
-    | StrOutputParser()
-)
-
-# ---------------------------------------------------------
-# JSON 파싱
-# ---------------------------------------------------------
-def parse_transfer_json(text: str):
+def _parse_transfer_json(text: str) -> dict:
     try:
         text = text.strip().replace("```json", "").replace("```", "")
         return json.loads(text)
-    except:
+    except Exception:
         return {"target": None, "amount": None, "currency": None}
+
+def _node_extract(state: TransferExtractState) -> dict:
+    template = read_prompt("transfer_01_extract.md")
+    prompt = PromptTemplate.from_template(template)
+    chain = prompt | llm | StrOutputParser()
+    raw = chain.invoke({"question": state["question"]})
+    extracted = _parse_transfer_json(raw)
+    return {"raw_llm_output": raw, "extracted": extracted}
+
+_transfer_extract_graph = None
+
+def _get_transfer_extract_graph():
+    global _transfer_extract_graph
+    if _transfer_extract_graph is None:
+        builder = StateGraph(TransferExtractState)
+        builder.add_node("extract", _node_extract)
+        builder.add_edge(START, "extract")
+        builder.add_edge("extract", END)
+        _transfer_extract_graph = builder.compile()
+    return _transfer_extract_graph
+
+def _invoke_transfer_extract(question: str) -> dict:
+    graph = _get_transfer_extract_graph()
+    result = graph.invoke({"question": question})
+    return result.get("extracted", {"target": None, "amount": None, "currency": None})
+
+def parse_transfer_json(text: str):
+    return _parse_transfer_json(text)
 
 # ---------------------------------------------------------
 # DB 검증 함수들
@@ -261,12 +284,10 @@ def process_transfer(question: str, username: str, context: dict | None = None):
         context.pop("missing_field")
 
     # --------------------------------------------------
-    # 4. 최초 요청 (LLM 추출)
+    # 4. 최초 요청 (LangGraph 추출)
     # --------------------------------------------------
     if not context.get("target") and not context.get("amount") and not context.get("currency"):
-        raw_result = transfer_chain.invoke({"question": question})
-        info = parse_transfer_json(raw_result)
-
+        info = _invoke_transfer_extract(question)
         context["target"]   = info.get("target")
         context["amount"]   = info.get("amount")
         context["currency"] = info.get("currency")
