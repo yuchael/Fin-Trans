@@ -14,7 +14,7 @@ load_dotenv()
 # ==========================================
 # 1. 페이지 설정 및 디자인
 # ==========================================
-st.set_page_config(page_title="Woori AI Assistant", page_icon="🦋", layout="centered")
+st.set_page_config(page_title="Woori AI Assistant", page_icon="img/덤보.png", layout="centered")
 
 def local_css():
     st.markdown("""
@@ -92,7 +92,7 @@ if 'page' not in st.session_state:
     st.session_state['page'] = 'login'
 
 if 'messages' not in st.session_state:
-    st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋"}]
+    st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다."}]
 if 'chat_sessions' not in st.session_state:
     st.session_state['chat_sessions'] = []
 if 'user_input_text' not in st.session_state:
@@ -117,7 +117,9 @@ def login_page():
         mode_title = "Password"
         
         with st.form("login_form"):
-            st.markdown("<h1 style='text-align: center; font-size: 3.5rem; margin-bottom:0;'>🦋</h1>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([2,1,2])
+            with col2:
+                st.image("img/덤보.png", width=140)
             st.markdown(f"<h2 style='text-align: center; color: #1E293B;'>{mode_title} Login</h2>", unsafe_allow_html=True)
             
             username = st.text_input("아이디 (Username)", placeholder="example@woorifis.com")
@@ -152,7 +154,7 @@ def login_page():
                                 st.session_state['user_name_real'] = korean_name
                                 
                                 # [수정] 로그인 성공 시 이전 세션 데이터 확실하게 초기화
-                                st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋"}]
+                                st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다."}]
                                 st.session_state["transfer_context"] = None
                                 
                                 if "transfer_context" not in st.session_state:
@@ -255,7 +257,7 @@ def chat_page():
         """, unsafe_allow_html=True)
 
         if st.button("✨ 새 대화 시작", use_container_width=True):
-            st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋\n금융 업무부터 일상 대화까지 무엇이든 도와드릴게요."}]
+            st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. \n금융 업무부터 일상 대화까지 무엇이든 도와드릴게요."}]
             st.session_state["transfer_context"] = None
             st.session_state["last_result"] = None
             st.rerun()
@@ -271,7 +273,7 @@ def chat_page():
             st.session_state['user_name_real'] = None
             
             # [수정] 프론트엔드 대화 내역 및 컨텍스트 초기화
-            st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다. 🦋"}]
+            st.session_state['messages'] = [{"role": "assistant", "content": "안녕하세요! **우리 A.I 에이전트**입니다."}]
             st.session_state['transfer_context'] = None
             st.session_state['chat_sessions'] = []
             st.session_state['allowed_views'] = []

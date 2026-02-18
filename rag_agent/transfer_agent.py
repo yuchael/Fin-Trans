@@ -78,12 +78,12 @@ def get_all_contacts(user_id):
 
 def resolve_contact_name(user_id, user_input):
     contacts = get_all_contacts(user_id)
-    user_input = user_input.strip()
+    user_input = user_input.strip().lower()
 
     for c in contacts:
-        if user_input == c["contact_name"]:
+        if user_input == c["contact_name"].lower():
             return c["contact_name"]
-        if c.get("relationship") and user_input == c["relationship"]:
+        if c.get("relationship") and user_input == c["relationship"].lower():
             return c["contact_name"]
     return None
 
