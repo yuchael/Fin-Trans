@@ -40,7 +40,6 @@ def setup_logging():
 def fetch_naver_rates():
     """네이버 금융 환율 정보를 가져옵니다."""
     url = "https://finance.naver.com/marketindex/exchangeList.naver"
-    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -49,51 +48,26 @@ def fetch_naver_rates():
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        
         if response.status_code == 200:
-            response.encoding = 'cp949' # 네이버 금융 인코딩
-            
+            response.encoding = 'cp949'
             now = datetime.now()
             date_str = now.strftime("%Y%m%d")
             
-            save_dir = "data"
-            os.makedirs(save_dir, exist_ok=True)
+            html_io = io.StringIO(response.text)
+            dfs = pd.read_html(html_io, header=1)
             
-            # HTML 파일 저장
-            html_filename = os.path.join(save_dir, "naver_exchange.html")
-            try:
-                with open(html_filename, "w", encoding="utf-8-sig") as f:
-                    f.write(response.text)
-            except Exception:
-                pass # HTML 저장 실패는 로그 생략
-
-            # 데이터 파싱
-            try:
-                html_io = io.StringIO(response.text)
-                dfs = pd.read_html(html_io, header=1)
-                
-                if dfs:
-                    df = dfs[0]
-                    target_df = df.iloc[:, [0, 1, 4, 5]].copy()
-                    target_df.columns = ['raw_name', '매매기준율', '송금_보내실때', '송금_받으실때']
-                    
-                    logging.info(f"✅ 파싱 성공! 데이터 {len(target_df)}건을 찾았습니다.")
-                    return target_df, date_str
-                else:
-                    return None, None
-
-            except Exception as parse_error:
-                logging.error(f"⚠️ 파싱 중 에러 발생: {parse_error}")
-                return None, None
-        else:
-            return None, None
-
+            if dfs:
+                df = dfs[0]
+                target_df = df.iloc[:, [0, 1, 4, 5]].copy()
+                target_df.columns = ['raw_name', '매매기준율', '송금_보내실때', '송금_받으실때']
+                logging.info(f"✅ 파싱 성공! 데이터 {len(target_df)}건을 찾았습니다.")
+                return target_df, date_str
     except Exception as e:
         logging.error(f"❌ 크롤링 에러: {e}")
-        return None, None
+    return None, None
 
 def process_and_save(df, date_str):
-    """데이터 전처리 및 저장"""
+    """데이터 전처리, 단위 변환(100단위 통화) 및 저장"""
     if df is None or df.empty:
         return
 
@@ -115,20 +89,31 @@ def process_and_save(df, date_str):
         df[col] = df[col].astype(str).str.replace(",", "").str.strip()
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # 3. 기준일자 추가
-    df['기준일자'] = date_str
+    # --- [추가 요구사항] JPY, IDR, VND 100으로 나누기 ---
+    target_currencies = ['JPY', 'IDR', 'VND']
+    mask = df['통화명'].isin(target_currencies)
+    
+    # 해당 통화들에 대해 수치 데이터 100으로 나누기 (1단위 환율로 변환)
+    df.loc[mask, numeric_cols] = df.loc[mask, numeric_cols] / 100
+    if mask.any():
+        logging.info(f"💡 {', '.join(target_currencies)} 통화의 단위를 100에서 1로 변환했습니다.")
 
-    # 4. CSV 저장 (요청하신 순서: 통화명, 국가명, 매매기준율, 보내실때, 받으실때)
+    df[numeric_cols] = df[numeric_cols].round(2)
+    # 3. 기준일자 추가 및 컬럼 정리
+    df['기준일자'] = date_str
     final_columns = ['기준일자', '통화명', '국가명', '매매기준율', '송금_보내실때', '송금_받으실때']
     df = df[final_columns]
 
+    # 4. CSV 저장
     save_dir = "data"
+    os.makedirs(save_dir, exist_ok=True)
     csv_filename = os.path.join(save_dir, "exchange_rates.csv")
     df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     logging.info(f"💾 CSV 저장 완료: {csv_filename}")
     
-    # --- MySQL 저장 ---
+    # 5. MySQL 저장
     save_to_mysql(df, date_str)
+
 
 def save_to_mysql(df, date_str):
     """MySQL 데이터베이스에 저장 (수정된 테이블 구조 반영)"""
