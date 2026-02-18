@@ -99,6 +99,34 @@ def _summarizer_chain():
     return PromptTemplate.from_template(t) | llm | StrOutputParser()
 
 # ---------------------------------------------------------
+# 역번역 헬퍼 함수 (모든 답변에 적용)
+# ---------------------------------------------------------
+def translate_answer(korean_text: str, target_language: str) -> str:
+    """
+    한국어 답변을 사용자 입력 언어로 번역
+    - 한국어면 그대로 반환
+    - 다른 언어면 역번역 수행
+    """
+    if not korean_text:
+        return korean_text
+    
+    # 한국어면 번역 불필요
+    if "Korean" in target_language or "한국어" in target_language:
+        return korean_text
+    
+    try:
+        print(f"🔄 [Translation] 답변을 {target_language}로 번역 중...")
+        chain = _re_translation_chain()
+        translated = chain.invoke({
+            "target_language": target_language,
+            "korean_answer": korean_text
+        }).strip()
+        return translated
+    except Exception as e:
+        print(f"⚠️ 역번역 실패: {e}, 원본 반환")
+        return korean_text
+
+# ---------------------------------------------------------
 # [LangGraph] 노드 함수
 # ---------------------------------------------------------
 def node_translate(state: MainAgentState) -> dict:
@@ -154,8 +182,13 @@ def node_finrag(state: MainAgentState) -> dict:
 
 def node_transfer(state: MainAgentState) -> dict:
     print("\n=== 💸 Transfer Agent 호출 ===")
-    result = get_transfer_answer(state["refined_query"], state["username"], context=None)
+    # 최초 송금 요청 시 언어를 컨텍스트에 저장하기 위해 빈 컨텍스트 전달
+    result = get_transfer_answer(state["refined_query"], state["username"], context={})
     if isinstance(result, dict):
+        # 최초 요청이면 언어 정보를 컨텍스트에 저장
+        if result.get("context") and not result["context"].get("source_language"):
+            source_lang = state.get("source_lang", "Korean")
+            result["context"]["source_language"] = source_lang
         return {"transfer_result": result, "korean_answer": None}
     print("=== 💸 Transfer Agent 종료 ===\n")
     return {"korean_answer": result, "transfer_result": None}
@@ -193,25 +226,11 @@ def node_summarize(state: MainAgentState) -> dict:
     return {}
 
 def node_re_translate(state: MainAgentState) -> dict:
+    """모든 답변을 사용자 입력 언어로 역번역"""
     source_lang = state.get("source_lang", "Korean")
     korean_answer = state.get("korean_answer", "")
-    if "Korean" in source_lang or "한국어" in source_lang:
-        return {"final_answer": korean_answer}
-    print(f"🔄 [Step 5] 답변 역번역 중...")
-    chain = _re_translation_chain()
-    foreign_answer = chain.invoke({
-        "target_language": source_lang,
-        "korean_answer": korean_answer
-    })
-    final = f"""
-{foreign_answer}
-
-=========================================
-📢 [한국어 번역본 / Demo Translation]
-{korean_answer}
-=========================================
-"""
-    return {"final_answer": final}
+    final_answer = translate_answer(korean_answer, source_lang)
+    return {"final_answer": final_answer}
 
 # ---------------------------------------------------------
 # 라우터: 카테고리별 다음 노드
@@ -296,19 +315,47 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
     # [Priority] 송금 컨텍스트가 있으면 LangGraph 거치지 않고 바로 송금 에이전트
     if transfer_context:
         print("💸 [System] 송금 진행 중... (Context 유지)")
-        # 버튼 신호(__YES__ / __NO__)는 번역하지 않고 그대로 전달 (번역 시 yes_signals 매칭 실패 방지)
+        
+        # 최초 질문의 언어를 컨텍스트에서 가져오기 (없으면 현재 입력으로 감지)
+        source_lang = transfer_context.get("source_language", "Korean")
+        
+        # 버튼 신호나 숫자 입력은 번역하지 않음 (저장된 언어 사용)
         if question.strip().upper() in ("__YES__", "__NO__"):
             korean_query = question
+            # 저장된 언어가 없으면 기본값 사용 (이미 위에서 설정됨)
+        elif question.strip().isdigit() or (len(question.strip()) <= 10 and not any(c.isalpha() for c in question)):
+            # 숫자나 짧은 비문자 입력(PIN 등)은 번역하지 않고, 저장된 언어 사용
+            korean_query = question
         else:
+            # 텍스트 입력이면 언어 감지 시도
             try:
                 chain = _translation_chain()
                 trans_result_str = chain.invoke({"question": question}).strip()
                 trans_result_str = trans_result_str.replace("```json", "").replace("```", "")
                 trans_result = json.loads(trans_result_str)
+                detected_lang = trans_result.get("source_language", "Korean")
                 korean_query = trans_result.get("korean_query", question)
+                
+                # 컨텍스트에 언어가 없으면 새로 감지한 언어 저장
+                if source_lang == "Korean" and detected_lang != "Korean":
+                    source_lang = detected_lang
+                    transfer_context["source_language"] = source_lang
             except Exception:
                 korean_query = question
-        return get_transfer_answer(korean_query, username, context=transfer_context)
+        
+        # 송금 에이전트 호출
+        transfer_result = get_transfer_answer(korean_query, username, context=transfer_context)
+        
+        # dict 반환 시 message 필드 역번역 (저장된 언어 사용)
+        if isinstance(transfer_result, dict) and "message" in transfer_result:
+            korean_msg = transfer_result["message"]
+            translated_msg = translate_answer(korean_msg, source_lang)
+            transfer_result["message"] = translated_msg
+            # 컨텍스트에 언어 정보 유지 (진행 중 상태일 때)
+            if "context" in transfer_result:
+                transfer_result["context"]["source_language"] = source_lang
+        
+        return transfer_result
 
     initial_state: MainAgentState = {
         "question": question,
@@ -320,8 +367,14 @@ def run_fintech_agent(question, username="test_user", transfer_context=None, all
     graph = get_main_graph()
     result = graph.invoke(initial_state)
 
-    # 송금 결과가 dict면 그대로 반환 (confirm_buttons 등)
+    # 송금 결과가 dict면 message 필드 역번역 후 반환
     if result.get("transfer_result") is not None:
-        return result["transfer_result"]
+        transfer_result = result["transfer_result"]
+        source_lang = result.get("source_lang", "Korean")
+        if isinstance(transfer_result, dict) and "message" in transfer_result:
+            korean_msg = transfer_result["message"]
+            translated_msg = translate_answer(korean_msg, source_lang)
+            transfer_result["message"] = translated_msg
+        return transfer_result
 
     return result.get("final_answer") or result.get("korean_answer") or ""
